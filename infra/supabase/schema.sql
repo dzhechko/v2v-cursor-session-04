@@ -48,26 +48,33 @@ CREATE TABLE IF NOT EXISTS salesai_sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   profile_id UUID REFERENCES salesai_profiles(id) ON DELETE CASCADE,
   company_id UUID REFERENCES salesai_companies(id),
-  
+
   -- Session metadata
   title VARCHAR(255) NOT NULL,
   status salesai_session_status DEFAULT 'active',
   started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   ended_at TIMESTAMP WITH TIME ZONE,
   duration_seconds INTEGER,
-  
-  -- Audio metadata  
+
+  -- Audio metadata
   audio_quality JSONB,
   audio_file_url TEXT,
   audio_file_size BIGINT,
-  
+
+  -- Transcript data
+  transcript JSONB,
+
   -- Performance tracking
   minute_cost DECIMAL(10,4),
   processing_status TEXT DEFAULT 'pending',
-  
+
   -- Analytics summary
   analytics_summary JSONB,
-  
+  overall_score INTEGER CHECK (overall_score >= 0 AND overall_score <= 100),
+  feedback_summary TEXT,
+  session_type VARCHAR(50) DEFAULT 'practice',
+  analyzed_at TIMESTAMP WITH TIME ZONE,
+
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -98,23 +105,26 @@ CREATE TABLE IF NOT EXISTS salesai_transcripts (
 CREATE TABLE IF NOT EXISTS salesai_analysis_results (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_id UUID REFERENCES salesai_sessions(id) ON DELETE CASCADE,
-  
+
   -- Analysis metadata
   analysis_type VARCHAR(50),
   provider VARCHAR(50),
   version VARCHAR(20),
-  
+
   -- Results data
   results JSONB NOT NULL,
-  
+
   -- Quality metrics
   confidence_score DECIMAL(5,4),
   processing_time_ms INTEGER,
-  
+
   -- Cost tracking
   api_cost_usd DECIMAL(10,6),
-  
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+
+  -- Unique constraint to prevent duplicate analysis results per session
+  UNIQUE (session_id)
 );
 
 -- Session analytics table (for faster queries)
@@ -123,25 +133,28 @@ CREATE TABLE IF NOT EXISTS salesai_session_analytics (
   session_id UUID REFERENCES salesai_sessions(id) ON DELETE CASCADE,
   profile_id UUID REFERENCES salesai_profiles(id),
   company_id UUID REFERENCES salesai_companies(id),
-  
+
   -- Core metrics
   overall_score INTEGER CHECK (overall_score >= 0 AND overall_score <= 100),
   talk_time_ratio DECIMAL(5,4),
   filler_words_count INTEGER,
   speaking_pace_wpm INTEGER,
   sentiment_score DECIMAL(5,4),
-  
+
   -- Skill scores
   opening_score INTEGER CHECK (opening_score >= 0 AND opening_score <= 100),
   questioning_score INTEGER CHECK (questioning_score >= 0 AND questioning_score <= 100),
   objection_handling_score INTEGER CHECK (objection_handling_score >= 0 AND objection_handling_score <= 100),
   closing_score INTEGER CHECK (closing_score >= 0 AND closing_score <= 100),
-  
+
   -- Time-based analytics
   session_date DATE,
   session_hour INTEGER,
-  
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+
+  -- Unique constraint to prevent duplicate analytics per session
+  UNIQUE (session_id)
 );
 
 -- Subscriptions table
@@ -216,6 +229,8 @@ CREATE INDEX idx_salesai_sessions_profile ON salesai_sessions (profile_id);
 CREATE INDEX idx_salesai_sessions_company ON salesai_sessions (company_id);
 CREATE INDEX idx_salesai_sessions_status ON salesai_sessions (status);
 CREATE INDEX idx_salesai_sessions_created ON salesai_sessions (created_at);
+CREATE INDEX idx_salesai_sessions_transcript ON salesai_sessions USING GIN (transcript);
+CREATE INDEX idx_salesai_sessions_analyzed ON salesai_sessions (analyzed_at);
 CREATE INDEX idx_salesai_transcripts_session ON salesai_transcripts (session_id);
 CREATE INDEX idx_salesai_analysis_session ON salesai_analysis_results (session_id);
 CREATE INDEX idx_salesai_analytics_profile ON salesai_session_analytics (profile_id);

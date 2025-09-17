@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
+import { createClient } from '@supabase/supabase-js';
 import { supabase, TABLES } from '../../../../lib/supabase-backend';
+import {
+  generateAnalysisMetrics,
+  parseAnalysisResponse,
+  extractTranscriptText,
+  createMockTranscript,
+  type TranscriptMessage
+} from '../../../../lib/analysis-utils';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -8,7 +16,7 @@ const openai = new OpenAI({
 
 interface AnalysisRequest {
   sessionId: string;
-  transcript?: string;
+  transcript?: TranscriptMessage[] | string;
   duration?: number;
   userInfo?: {
     name: string;
@@ -19,6 +27,8 @@ interface AnalysisRequest {
 
 const SALES_ANALYSIS_PROMPT = `
 You are an expert sales coach and trainer. Analyze the provided sales conversation and provide a comprehensive performance assessment.
+
+IMPORTANT: You must respond with ONLY a valid JSON object. Do not include any text before or after the JSON. Your response must be parseable JSON.
 
 Please provide your analysis in the following JSON format:
 
@@ -79,8 +89,69 @@ Be specific, actionable, and constructive in your feedback.
 
 export async function POST(request: NextRequest) {
   try {
+    // Parse request body once
     const body: AnalysisRequest = await request.json();
     const { sessionId, transcript, duration, userInfo } = body;
+
+    // Short-circuit for demo sessions - bypass auth entirely
+    if (sessionId?.startsWith('demo-')) {
+      const transcriptArray = Array.isArray(transcript) ? transcript : createMockTranscript();
+      const metrics = generateAnalysisMetrics(transcriptArray, duration || 300);
+      const analysis = generateMockAnalysis(userInfo);
+      return NextResponse.json({ analysis, metrics, isDemo: true });
+    }
+
+    // Check for authorization
+    const authHeader = request.headers.get('authorization');
+    const serverSecret = request.headers.get('x-server-secret');
+
+    // For internal server calls, check server secret
+    if (serverSecret && serverSecret === process.env.SERVER_SECRET) {
+      // Allow internal server calls
+    } else if (authHeader) {
+      // For external calls, verify user authentication and session ownership
+      const token = authHeader.replace('Bearer ', '');
+      const userSupabase = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        {
+          global: {
+            headers: {
+              Authorization: authHeader,
+            },
+          },
+        }
+      );
+
+      const { data: { user }, error: authError } = await userSupabase.auth.getUser();
+      if (authError || !user) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+
+      // Fetch the profile to get the correct profile.id
+      const { data: profile, error: profileError } = await supabase
+        .from(TABLES.PROFILES)
+        .select('id')
+        .eq('auth_id', user.id)
+        .single();
+
+      if (profileError || !profile) {
+        return NextResponse.json({ error: 'Profile not found' }, { status: 404 });
+      }
+
+      // Verify session ownership using profile.id
+      const { data: session, error: sessionError } = await supabase
+        .from(TABLES.SESSIONS)
+        .select('profile_id')
+        .eq('id', sessionId)
+        .single();
+
+      if (sessionError || !session || session.profile_id !== profile.id) {
+        return NextResponse.json({ error: 'Session not found or access denied' }, { status: 404 });
+      }
+    } else {
+      return NextResponse.json({ error: 'Authorization required' }, { status: 401 });
+    }
 
     // Check if OpenAI API key is configured
     if (!process.env.OPENAI_API_KEY) {
@@ -91,21 +162,46 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // If no meaningful transcript provided, return mock analysis
-    if (!transcript || transcript.length < 20) {
+    // Normalize transcript to array format
+    let transcriptArray: TranscriptMessage[] = [];
+    let transcriptText = '';
+
+    if (typeof transcript === 'string') {
+      transcriptText = transcript;
+      // Convert string to basic transcript format
+      transcriptArray = [{ speaker: 'user', message: transcript }];
+    } else if (Array.isArray(transcript)) {
+      transcriptArray = transcript;
+      transcriptText = extractTranscriptText(transcriptArray);
+    }
+
+    // If no meaningful transcript provided, use mock data
+    if (!transcriptText || transcriptText.length < 20) {
       console.log('📝 No meaningful transcript provided - generating demo analysis');
-      console.log('📝 Transcript length:', transcript?.length || 0, 'characters');
+      console.log('📝 Transcript length:', transcriptText?.length || 0, 'characters');
+      transcriptArray = createMockTranscript();
+      transcriptText = extractTranscriptText(transcriptArray);
+
+      // Compute metrics for demo
+      const metrics = generateAnalysisMetrics(transcriptArray, duration || 300);
+      const mockAnalysis = generateMockAnalysis(userInfo);
+
       return NextResponse.json({
-        analysis: generateMockAnalysis(userInfo),
+        analysis: mockAnalysis,
+        metrics,
         isDemo: true
       });
     }
     
-    console.log('🤖 Using real transcript for GPT-4 analysis:', transcript.length, 'characters');
+    console.log('🤖 Using real transcript for GPT-4 analysis:', transcriptText.length, 'characters');
+
+    // Compute structured metrics
+    const metrics = generateAnalysisMetrics(transcriptArray, duration || 0);
+    console.log('📊 Computed metrics:', metrics);
 
     // Generate AI analysis using OpenAI
     const completion = await openai.chat.completions.create({
-      model: "gpt-4",
+      model: "gpt-4o",
       messages: [
         {
           role: "system",
@@ -119,14 +215,21 @@ Duration: ${duration || 'Unknown'} seconds
 ${userInfo ? `Salesperson: ${userInfo.name} from ${userInfo.company} (${userInfo.role})` : ''}
 
 Conversation transcript:
-${transcript}
+${transcriptText}
+
+Additional metrics:
+- Talk time ratio: ${metrics.talkTimeRatio.toFixed(2)}
+- Filler words count: ${metrics.fillerWordsCount}
+- Speaking pace: ${metrics.speakingPaceWpm} words/minute
+- Sentiment score: ${metrics.sentimentScore.toFixed(2)}
 
 Please analyze this sales conversation and provide detailed feedback.
           `
         }
       ],
       temperature: 0.7,
-      max_tokens: 2000,
+      max_tokens: 3000,
+      response_format: { type: 'json_object' },
     });
 
     const analysisText = completion.choices[0]?.message?.content;
@@ -137,8 +240,12 @@ Please analyze this sales conversation and provide detailed feedback.
 
     try {
       // Parse the JSON response from OpenAI
-      const analysis = JSON.parse(analysisText);
-      
+      const analysis = parseAnalysisResponse(analysisText);
+
+      if (!analysis) {
+        throw new Error('Failed to parse analysis response');
+      }
+
       const finalAnalysis = {
         ...analysis,
         id: sessionId,
@@ -151,13 +258,14 @@ Please analyze this sales conversation and provide detailed feedback.
         try {
           console.log('💾 Saving analysis to database for session:', sessionId);
           
-          // Update session with analysis results
+          // Update session with analysis results and transcript
           const { error: updateError } = await supabase
             .from(TABLES.SESSIONS)
             .update({
-              overall_score: analysis.overallScore || 0,
+              transcript: transcriptArray,
+              overall_score: Math.round((analysis.overallScore || 0) * 10),
               feedback_summary: analysis.detailedAnalysis ? analysis.detailedAnalysis.substring(0, 500) + '...' : null,
-              session_type: analysis.title || 'Voice Training Session', 
+              session_type: analysis.title || 'Voice Training Session',
               status: 'analyzed',
               processing_status: 'completed',
               analyzed_at: new Date().toISOString()
@@ -170,17 +278,61 @@ Please analyze this sales conversation and provide detailed feedback.
             console.log('✅ Analysis saved to database successfully');
           }
 
+          // Fetch session data to get profile_id and company_id for analytics
+          const { data: sessionData, error: sessionFetchError } = await supabase
+            .from(TABLES.SESSIONS)
+            .select('profile_id, company_id')
+            .eq('id', sessionId)
+            .single();
+
+          if (sessionFetchError) {
+            console.error('❌ Failed to fetch session data for analytics:', sessionFetchError);
+          }
+
           // Save detailed analysis to analysis_results table
           const { error: analysisError } = await supabase
             .from(TABLES.ANALYSIS_RESULTS)
             .upsert({
               session_id: sessionId,
-              analysis_data: finalAnalysis,
+              analysis_type: 'gpt-4-sales-coaching',
+              provider: 'openai',
+              version: '1.0',
+              results: finalAnalysis,
+              confidence_score: 0.85,
               created_at: new Date().toISOString()
+            }, {
+              onConflict: 'session_id'
             });
 
           if (analysisError) {
             console.error('❌ Failed to save detailed analysis:', analysisError);
+          }
+
+          // Save structured metrics to session_analytics table
+          const { error: metricsError } = await supabase
+            .from(TABLES.SESSION_ANALYTICS)
+            .upsert({
+              session_id: sessionId,
+              profile_id: sessionData?.profile_id || null,
+              company_id: sessionData?.company_id || null,
+              overall_score: Math.round((analysis.overallScore || 0) * 10), // Convert to 0-100 scale
+              talk_time_ratio: metrics.talkTimeRatio,
+              filler_words_count: metrics.fillerWordsCount,
+              speaking_pace_wpm: metrics.speakingPaceWpm,
+              sentiment_score: metrics.sentimentScore,
+              opening_score: null, // No opening score available in current AI response format
+              questioning_score: null,
+              objection_handling_score: analysis.objectionHandling?.score ? Math.round(analysis.objectionHandling.score * 10) : null,
+              closing_score: analysis.closingEffectiveness?.score ? Math.round(analysis.closingEffectiveness.score * 10) : null,
+              session_date: new Date().toISOString().split('T')[0],
+              session_hour: new Date().getHours(),
+              created_at: new Date().toISOString()
+            }, {
+              onConflict: 'session_id'
+            });
+
+          if (metricsError) {
+            console.error('❌ Failed to save metrics:', metricsError);
           }
           
         } catch (dbError) {
@@ -191,6 +343,7 @@ Please analyze this sales conversation and provide detailed feedback.
       
       return NextResponse.json({
         analysis: finalAnalysis,
+        metrics,
         isDemo: false
       });
       
@@ -199,8 +352,12 @@ Please analyze this sales conversation and provide detailed feedback.
       console.log('Raw OpenAI response:', analysisText);
       
       // Fallback to mock analysis if parsing fails
+      const mockAnalysis = generateMockAnalysis(userInfo);
+      const fallbackMetrics = generateAnalysisMetrics(transcriptArray, duration || 300);
+
       return NextResponse.json({
-        analysis: generateMockAnalysis(userInfo),
+        analysis: mockAnalysis,
+        metrics: fallbackMetrics,
         isDemo: true,
         error: 'Failed to parse AI analysis'
       });
@@ -210,8 +367,12 @@ Please analyze this sales conversation and provide detailed feedback.
     console.error('Error generating session analysis:', error);
     
     // Fallback to mock analysis on any error
+    const mockTranscript = createMockTranscript();
+    const mockMetrics = generateAnalysisMetrics(mockTranscript, 300);
+
     return NextResponse.json({
       analysis: generateMockAnalysis(),
+      metrics: mockMetrics,
       isDemo: true,
       error: error instanceof Error ? error.message : 'Unknown error'
     });

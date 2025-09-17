@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase, TABLES } from '../../../../lib/supabase-backend';
+import { createClient } from '@supabase/supabase-js';
 
 export async function GET(
   request: NextRequest,
@@ -7,7 +8,7 @@ export async function GET(
 ) {
   try {
     const sessionId = params.id;
-    
+
     // Handle demo sessions
     if (sessionId.startsWith('demo-')) {
       console.log('🎭 Demo session requested:', sessionId);
@@ -18,7 +19,30 @@ export async function GET(
       });
     }
 
-    // Get session from database
+    // Verify user authentication for real sessions
+    const authHeader = request.headers.get('authorization');
+    if (!authHeader) {
+      return NextResponse.json({ error: 'Authorization required' }, { status: 401 });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: userError } = await supabase.auth.getUser(token);
+    if (userError || !user) {
+      return NextResponse.json({ error: 'Invalid authorization token' }, { status: 401 });
+    }
+
+    // Get user profile
+    const { data: profile, error: profileError } = await supabase
+      .from(TABLES.PROFILES)
+      .select('*')
+      .eq('auth_id', user.id)
+      .single();
+
+    if (profileError || !profile) {
+      return NextResponse.json({ error: 'User profile not found' }, { status: 404 });
+    }
+
+    // Get session from database with ownership verification
     const { data: session, error: sessionError } = await supabase
       .from(TABLES.SESSIONS)
       .select(`
@@ -26,11 +50,11 @@ export async function GET(
         profile:${TABLES.PROFILES}(
           first_name,
           last_name,
-          company_name,
           position
         )
       `)
       .eq('id', sessionId)
+      .eq('profile_id', profile.id)
       .single();
 
     if (sessionError || !session) {
@@ -41,10 +65,16 @@ export async function GET(
       );
     }
 
-    // Get detailed analysis if available
+    // Get detailed analysis and metrics if available
     const { data: analysisResult } = await supabase
       .from(TABLES.ANALYSIS_RESULTS)
-      .select('analysis_data')
+      .select('*')
+      .eq('session_id', sessionId)
+      .single();
+
+    const { data: sessionMetrics } = await supabase
+      .from(TABLES.SESSION_ANALYTICS)
+      .select('*')
       .eq('session_id', sessionId)
       .single();
 
@@ -63,11 +93,34 @@ export async function GET(
       analyzedAt: session.analyzed_at,
       processingStatus: session.processing_status,
       profile: session.profile,
-      detailedAnalysis: analysisResult?.analysis_data || null
+      detailedAnalysis: analysisResult?.results || null,
+      analysisMetadata: {
+        analysisType: analysisResult?.analysis_type,
+        provider: analysisResult?.provider,
+        version: analysisResult?.version,
+        confidenceScore: analysisResult?.confidence_score,
+        processingTimeMs: analysisResult?.processing_time_ms,
+        createdAt: analysisResult?.created_at
+      },
+      metrics: sessionMetrics ? {
+        talkTimeRatio: sessionMetrics.talk_time_ratio,
+        fillerWordsCount: sessionMetrics.filler_words_count,
+        speakingPaceWpm: sessionMetrics.speaking_pace_wpm,
+        sentimentScore: sessionMetrics.sentiment_score,
+        overallScore: sessionMetrics.overall_score,
+        openingScore: sessionMetrics.opening_score,
+        questioningScore: sessionMetrics.questioning_score,
+        objectionHandlingScore: sessionMetrics.objection_handling_score,
+        closingScore: sessionMetrics.closing_score,
+        sessionDate: sessionMetrics.session_date,
+        sessionHour: sessionMetrics.session_hour
+      } : null
     };
 
     return NextResponse.json({
       session: sessionData,
+      analysis: analysisResult?.results || null,
+      metrics: sessionData.metrics,
       isDemo: false
     });
 
