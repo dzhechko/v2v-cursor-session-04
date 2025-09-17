@@ -18,7 +18,7 @@ import {
   BarChart3
 } from 'lucide-react';
 import { useParams } from 'next/navigation';
-import { createClient } from '../../../lib/supabase';
+import { createClient } from '../../../../lib/supabase';
 
 interface AnalysisData {
   overallScore: number;
