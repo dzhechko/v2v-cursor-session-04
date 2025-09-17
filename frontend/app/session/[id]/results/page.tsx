@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
+import { normalizeSessionStatus, normalizeDates, isDemoSession } from '../../../lib/session-utils';
 import {
   ArrowLeft,
   CheckCircle,
@@ -87,24 +88,33 @@ export default function SessionResultsPage() {
 
         console.log('🔍 Loading session analysis:', sessionId);
 
-        // Handle demo sessions with localStorage
-        if (sessionId.startsWith('demo-') || sessionId.startsWith('temp-')) {
+        // Handle demo sessions with localStorage - support various ID formats
+        if (isDemoSession(sessionId)) {
           console.log('🎭 Demo session - loading from localStorage');
           setIsDemo(true);
 
-          // Load demo data from localStorage or use mock data
+          // Load demo data from localStorage with validation
           const demoAnalysis = localStorage.getItem(`analysis-${sessionId}`);
           const demoDuration = localStorage.getItem(`session-duration-${sessionId}`);
 
           if (demoAnalysis) {
-            const parsedAnalysis = JSON.parse(demoAnalysis);
+            let parsedAnalysis;
+            try {
+              parsedAnalysis = JSON.parse(demoAnalysis);
+            } catch (e) {
+              console.error('❌ Failed to parse demo analysis:', e);
+              setError('Demo session data is corrupted. Please start a new session.');
+              setIsLoading(false);
+              return;
+            }
             setSessionData({
               id: sessionId,
               title: parsedAnalysis.title || 'Demo Voice Training Session',
               status: 'analyzed',
               duration: parseInt(demoDuration || '300'),
               transcript: [],
-              overallScore: parsedAnalysis.overallScore,
+              // Store as 0-100 scale for consistency
+              overallScore: parsedAnalysis.overallScore * 10,
               feedbackSummary: parsedAnalysis.detailedAnalysis?.substring(0, 200) + '...',
               createdAt: new Date().toISOString(),
               endedAt: new Date().toISOString(),
@@ -116,7 +126,8 @@ export default function SessionResultsPage() {
                 fillerWordsCount: 8,
                 speakingPaceWpm: 145,
                 sentimentScore: 0.72,
-                overallScore: Math.round(parsedAnalysis.overallScore * 10)
+                // Keep consistent with 0-100 scale
+                overallScore: parsedAnalysis.overallScore * 10
               }
             });
             setIsLoading(false);
@@ -129,6 +140,7 @@ export default function SessionResultsPage() {
         const { data: { session } } = await supabase.auth.getSession();
         const token = session?.access_token;
 
+        console.log('📡 Fetching session from database:', sessionId);
         const response = await fetch(`/api/session/${sessionId}`, {
           headers: {
             ...(token && { 'Authorization': `Bearer ${token}` }),
@@ -141,13 +153,71 @@ export default function SessionResultsPage() {
           if (result.isDemo) {
             setIsDemo(true);
             setError('This is a demo session. Analysis data is stored locally.');
+          } else if (result.session) {
+            // Handle database session response format
+            const dbSession = result.session;
+
+            // Map database session to component format
+            const mappedSession = {
+              ...dbSession,
+              // Ensure title is properly mapped
+              title: dbSession.title || dbSession.session_type || 'Voice Training Session',
+              // Duration is already in seconds from API
+              duration: dbSession.duration || dbSession.duration_seconds || 0,
+              // Map overall score (API returns 0-100)
+              overallScore: dbSession.overallScore || 0,
+              // Map dates using shared utility
+              ...normalizeDates(dbSession),
+              // Handle analysis data
+              detailedAnalysis: dbSession.detailedAnalysis || null,
+              metrics: dbSession.metrics || {
+                talkTimeRatio: 0,
+                fillerWordsCount: 0,
+                speakingPaceWpm: 0,
+                sentimentScore: 0,
+                overallScore: dbSession.overallScore || 0
+              },
+              // Normalize status using shared utility
+              status: normalizeSessionStatus(dbSession.status, !!dbSession.detailedAnalysis)
+            };
+
+            setSessionData(mappedSession);
+            console.log('✅ Database session loaded successfully:', mappedSession.id);
+
+            // If session is still processing, check again in a few seconds
+            if (mappedSession.status === 'active' || mappedSession.status === 'processing') {
+              console.log('⏳ Session still processing, will retry...');
+              setTimeout(() => {
+                loadSessionData();
+              }, 3000);
+            }
           } else {
-            setSessionData(result.session);
-            console.log('✅ Session data loaded successfully');
+            console.warn('⚠️ Unexpected response format:', result);
+            setError('Session data format error. Please try again.');
           }
         } else {
-          const errorData = await response.json();
-          setError(`Failed to load session: ${errorData.error || 'Unknown error'}`);
+          const errorText = await response.text();
+          let errorData;
+          try {
+            errorData = JSON.parse(errorText);
+          } catch {
+            errorData = { error: errorText };
+          }
+
+          // Handle specific error cases
+          if (response.status === 401) {
+            setError('Authentication required. Please log in to view this session.');
+          } else if (response.status === 404) {
+            setError('Session not found. It may have been deleted or does not exist.');
+          } else if (response.status >= 500) {
+            setError('Server error. Please try again later.');
+            // Retry server errors
+            setTimeout(() => {
+              loadSessionData();
+            }, 5000);
+          } else {
+            setError(`Failed to load session: ${errorData.error || 'Unknown error'}`);
+          }
         }
 
       } catch (error) {
@@ -196,22 +266,45 @@ export default function SessionResultsPage() {
   }
 
   if (error) {
+    const isAuthError = error.includes('Authentication');
+    const isNotFound = error.includes('not found');
+    const isServerError = error.includes('Server error');
+
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center max-w-md">
-          <AlertTriangle className="w-12 h-12 text-red-500 mx-auto mb-4" />
-          <h2 className="text-xl font-semibold text-gray-700 mb-2">Analysis Error</h2>
+          <AlertTriangle className={`w-12 h-12 ${
+            isAuthError ? 'text-amber-500' :
+            isNotFound ? 'text-gray-500' :
+            'text-red-500'
+          } mx-auto mb-4`} />
+          <h2 className="text-xl font-semibold text-gray-700 mb-2">
+            {isAuthError ? 'Authentication Required' :
+             isNotFound ? 'Session Not Found' :
+             'Analysis Error'}
+          </h2>
           <p className="text-gray-600 mb-6">{error}</p>
           <div className="space-x-4">
-            <button
-              onClick={() => window.location.reload()}
-              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
-            >
-              Try Again
-            </button>
-            <Link href="/session" className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors">
-              Start New Session
-            </Link>
+            {!isNotFound && (
+              <button
+                onClick={() => {
+                  setError(null);
+                  window.location.reload();
+                }}
+                className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+              >
+                {isServerError ? 'Retry' : 'Try Again'}
+              </button>
+            )}
+            {isAuthError ? (
+              <Link href="/login" className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors">
+                Log In
+              </Link>
+            ) : (
+              <Link href="/session" className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors">
+                Start New Session
+              </Link>
+            )}
           </div>
         </div>
       </div>
@@ -233,8 +326,29 @@ export default function SessionResultsPage() {
     );
   }
 
-  const analysis = sessionData.detailedAnalysis;
-  const metrics = sessionData.metrics;
+  // Handle missing or incomplete analysis data
+  const analysis = sessionData.detailedAnalysis || {
+    overallScore: sessionData.overallScore ? sessionData.overallScore / 10 : 0, // Convert 0-100 to 0-10
+    title: sessionData.title,
+    strengths: [],
+    areasForImprovement: [],
+    effectiveTechniques: [],
+    techniquesNeedingWork: [],
+    objectionHandling: undefined,
+    closingEffectiveness: undefined,
+    keyRecommendations: [],
+    detailedAnalysis: sessionData.feedbackSummary || 'Analysis is being processed...',
+    duration: sessionData.duration,
+    date: sessionData.createdAt
+  };
+
+  const metrics = sessionData.metrics || {
+    talkTimeRatio: 0,
+    fillerWordsCount: 0,
+    speakingPaceWpm: 0,
+    sentimentScore: 0,
+    overallScore: sessionData.overallScore || 0
+  };
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -280,7 +394,13 @@ export default function SessionResultsPage() {
               <h3 className="font-semibold text-gray-900">Overall Score</h3>
             </div>
             <p className="text-3xl font-bold text-green-500">
-              {analysis ? `${analysis.overallScore}/10` : `${sessionData.overallScore || 0}/100`}
+              {(() => {
+                // Standardize to 0-100 scale for display
+                const scoreFrom10 = analysis?.overallScore ? analysis.overallScore * 10 : null;
+                const scoreFrom100 = sessionData.overallScore || 0;
+                const displayScore = scoreFrom10 ?? scoreFrom100;
+                return `${Math.round(displayScore)}/100`;
+              })()}
             </p>
             <p className="text-sm text-gray-500 mt-1">AI-powered evaluation</p>
           </motion.div>
@@ -359,11 +479,17 @@ export default function SessionResultsPage() {
                 <h3 className="font-medium text-gray-900 mb-2">Status</h3>
                 <p className="text-sm">
                   <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                    sessionData.status === 'analyzed'
-                      ? 'bg-green-100 text-green-600'
-                      : 'bg-yellow-100 text-yellow-600'
+                    sessionData.status === 'analyzed' ? 'bg-green-100 text-green-600' :
+                    sessionData.status === 'completed' ? 'bg-blue-100 text-blue-600' :
+                    sessionData.status === 'processing' ? 'bg-purple-100 text-purple-600' :
+                    sessionData.status === 'active' ? 'bg-yellow-100 text-yellow-600' :
+                    'bg-gray-100 text-gray-600'
                   }`}>
-                    {sessionData.status === 'analyzed' ? '✅ Analyzed' : '⏳ Processing'}
+                    {sessionData.status === 'analyzed' ? '✅ Analyzed' :
+                     sessionData.status === 'completed' ? '✓ Completed' :
+                     sessionData.status === 'processing' ? '⚡ Processing' :
+                     sessionData.status === 'active' ? '⏳ In Progress' :
+                     sessionData.status}
                   </span>
                 </p>
               </div>
@@ -398,12 +524,16 @@ export default function SessionResultsPage() {
                   <h2 className="text-lg font-semibold text-gray-900">Strengths</h2>
                 </div>
                 <ul className="space-y-2">
-                  {analysis.strengths.map((strength, index) => (
-                    <li key={index} className="flex items-start space-x-2">
-                      <span className="w-1.5 h-1.5 bg-green-500 rounded-full mt-2 flex-shrink-0"></span>
-                      <span className="text-gray-700">{strength}</span>
-                    </li>
-                  ))}
+                  {analysis.strengths?.length ? (
+                    analysis.strengths.map((strength, index) => (
+                      <li key={index} className="flex items-start space-x-2">
+                        <span className="w-1.5 h-1.5 bg-green-500 rounded-full mt-2 flex-shrink-0"></span>
+                        <span className="text-gray-700">{strength}</span>
+                      </li>
+                    ))
+                  ) : (
+                    <li className="text-sm text-gray-500">No strengths identified yet</li>
+                  )}
                 </ul>
               </motion.div>
 
@@ -418,12 +548,16 @@ export default function SessionResultsPage() {
                   <h2 className="text-lg font-semibold text-gray-900">Areas for Improvement</h2>
                 </div>
                 <ul className="space-y-2">
-                  {analysis.areasForImprovement.map((area, index) => (
-                    <li key={index} className="flex items-start space-x-2">
-                      <span className="w-1.5 h-1.5 bg-amber-500 rounded-full mt-2 flex-shrink-0"></span>
-                      <span className="text-gray-700">{area}</span>
-                    </li>
-                  ))}
+                  {analysis.areasForImprovement?.length ? (
+                    analysis.areasForImprovement.map((area, index) => (
+                      <li key={index} className="flex items-start space-x-2">
+                        <span className="w-1.5 h-1.5 bg-amber-500 rounded-full mt-2 flex-shrink-0"></span>
+                        <span className="text-gray-700">{area}</span>
+                      </li>
+                    ))
+                  ) : (
+                    <li className="text-sm text-gray-500">No improvement areas identified yet</li>
+                  )}
                 </ul>
               </motion.div>
             </div>
@@ -466,14 +600,18 @@ export default function SessionResultsPage() {
                 <h2 className="text-lg font-semibold text-gray-900">Key Recommendations</h2>
               </div>
               <ul className="space-y-3">
-                {analysis.keyRecommendations.map((action, index) => (
-                  <li key={index} className="flex items-start space-x-3">
-                    <span className="bg-blue-100 text-blue-600 px-2 py-1 rounded-full text-xs font-medium mt-0.5">
-                      {index + 1}
-                    </span>
-                    <span className="text-gray-700">{action}</span>
-                  </li>
-                ))}
+                {analysis.keyRecommendations?.length ? (
+                  analysis.keyRecommendations.map((action, index) => (
+                    <li key={index} className="flex items-start space-x-3">
+                      <span className="bg-blue-100 text-blue-600 px-2 py-1 rounded-full text-xs font-medium mt-0.5">
+                        {index + 1}
+                      </span>
+                      <span className="text-gray-700">{action}</span>
+                    </li>
+                  ))
+                ) : (
+                  <li className="text-sm text-gray-500">No recommendations available yet</li>
+                )}
               </ul>
             </motion.div>
           </>

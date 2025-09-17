@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
+import { normalizeSessionStatus } from '../../lib/session-utils';
 import { 
   Clock, 
   Target, 
@@ -34,9 +35,10 @@ interface RecentSession {
   id: string;
   title: string;
   duration: number;
+  minutes?: number;
   score: number;
   date: Date;
-  status: 'completed' | 'in_progress' | 'demo';
+  status: 'completed' | 'in_progress' | 'demo' | 'processing' | 'active' | 'analyzed';
   improvement?: number;
   feedback?: string;
   topics?: string[];
@@ -86,8 +88,11 @@ export default function DashboardPage() {
           const demoSessions = JSON.parse(localStorage.getItem('demo-sessions') || '[]');
           const formattedDemoSessions: RecentSession[] = demoSessions.map((session: any) => ({
             ...session,
+            id: session.id || `demo-${Date.now()}-${Math.random()}`, // Ensure demo sessions have IDs
             date: new Date(session.date),
-            minutes: session.duration ? Math.ceil(session.duration / 60) : session.minutes
+            minutes: session.duration ? Math.ceil(session.duration / 60) : session.minutes,
+            status: 'demo', // Explicitly mark as demo
+            feedback: session.feedback || 'Demo session - no analysis available'
           }));
           
           // Calculate demo stats
@@ -149,19 +154,50 @@ export default function DashboardPage() {
             const sessionsData = await sessionsResponse.json();
             console.log('📋 Sessions data received:', sessionsData);
             if (Array.isArray(sessionsData)) {
-              const sessions = sessionsData.map((session: any) => ({
-                ...session,
-                date: new Date(session.date)
-              }));
+              const sessions = sessionsData.map((session: any) => {
+                // Validate required fields
+                if (!session.id) {
+                  console.warn('⚠️ Session missing ID:', session);
+                  return null;
+                }
+
+                return {
+                  ...session,
+                  date: new Date(session.date),
+                  // Use minutes if available, otherwise calculate from duration
+                  minutes: session.minutes || (session.duration ? Math.ceil(session.duration / 60) : 0),
+                  // Ensure score is a number
+                  score: typeof session.score === 'number' ? session.score : 0,
+                  // Handle improvement as optional
+                  improvement: session.improvement || 0,
+                  // Provide defaults for optional fields
+                  feedback: session.feedback || 'Analysis pending',
+                  topics: session.topics || [],
+                  // Normalize status for consistent display
+                  status: normalizeSessionStatus(session.status, !!session.feedback)
+                };
+              }).filter(Boolean); // Remove any invalid sessions
+
               console.log('📋 Processed sessions:', sessions.length);
               setRecentSessions(sessions);
             } else {
               console.warn('⚠️ Sessions data is not an array:', typeof sessionsData);
+              setRecentSessions([]);
             }
           } else {
             console.error('❌ Sessions API failed:', sessionsResponse.status);
             const errorText = await sessionsResponse.text();
             console.error('❌ Sessions API error:', errorText);
+
+            // Retry logic for recoverable errors
+            if (sessionsResponse.status >= 500) {
+              console.log('🔄 Retrying sessions fetch...');
+              setTimeout(() => {
+                fetchDashboardData();
+              }, 2000);
+            } else {
+              toast.error('Failed to load sessions. Please try again.');
+            }
           }
         }
         
@@ -455,18 +491,28 @@ export default function DashboardPage() {
                             variants={itemVariants}
                             className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer"
                             onClick={() => {
-                              if (session.status === 'demo' || isDemo) {
-                                // For demo sessions, show a modal with demo feedback
+                              // Handle demo sessions
+                              if (session.status === 'demo' || session.id?.startsWith('demo-')) {
                                 toast.success('Demo session analytics loaded!');
-                              } else {
+                                return;
+                              }
+
+                              // Handle database sessions
+                              if (session.id) {
+                                console.log('🔗 Navigating to session results:', session.id);
                                 router.push(`/session/${session.id}/results`);
+                              } else {
+                                console.error('❌ Session missing ID:', session);
+                                toast.error('Unable to load session results');
                               }
                             }}
                           >
                             <div className="flex items-center space-x-3">
                               <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
-                                session.status === 'completed' ? 'bg-green-100 text-green-600' :
+                                session.status === 'completed' || session.status === 'analyzed' ? 'bg-green-100 text-green-600' :
                                 session.status === 'demo' ? 'bg-blue-100 text-blue-600' :
+                                session.status === 'active' ? 'bg-yellow-100 text-yellow-600' :
+                                session.status === 'processing' ? 'bg-purple-100 text-purple-600' :
                                 'bg-orange-100 text-orange-600'
                               }`}>
                                 <Mic className="w-5 h-5" />
@@ -474,7 +520,7 @@ export default function DashboardPage() {
                               <div>
                                 <p className="font-medium text-gray-900">{session.title}</p>
                                 <div className="flex items-center space-x-4 text-sm text-gray-500">
-                                  <span>{session.minutes || Math.ceil(session.duration / 60)} min</span>
+                                  <span>{session.minutes || (session.duration ? Math.ceil(session.duration / 60) : 0)} min</span>
                                   {session.score > 0 && (
                                     <span className="flex items-center">
                                       <span className="text-yellow-500 mr-1">★</span>

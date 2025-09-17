@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase, TABLES } from '@/lib/supabase-backend';
+import { supabase, TABLES } from '../../../../lib/supabase-backend';
 import { cookies } from 'next/headers';
 
 interface DashboardSession {
