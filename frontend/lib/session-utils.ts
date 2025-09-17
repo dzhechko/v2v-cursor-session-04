@@ -81,3 +81,12 @@ export function isDemoSession(sessionId?: string, status?: string): boolean {
   if (sessionId?.includes('demo')) return true;
   return false;
 }
+
+/**
+ * Checks if a session is an ElevenLabs session
+ * @param id - The session ID to check
+ * @returns Whether the session is from ElevenLabs
+ */
+export function isElevenLabsSession(id: string): boolean {
+  return id.startsWith('conv_');
+}

@@ -3,9 +3,10 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { normalizeSessionStatus, normalizeDates, isDemoSession } from '../../../../lib/session-utils';
+import { normalizeSessionStatus, normalizeDates, isDemoSession, isElevenLabsSession } from '../../../../lib/session-utils';
 import {
   ArrowLeft,
+  ArrowRight,
   CheckCircle,
   AlertTriangle,
   Award,
@@ -69,6 +70,7 @@ interface SessionData {
   profile?: any;
   detailedAnalysis?: AnalysisData;
   metrics?: SessionMetrics;
+  isElevenLabs?: boolean;
 }
 
 export default function SessionResultsPage() {
@@ -87,6 +89,12 @@ export default function SessionResultsPage() {
         setError(null);
 
         console.log('🔍 Loading session analysis:', sessionId);
+
+        // Handle ElevenLabs sessions (conv_* format)
+        if (isElevenLabsSession(sessionId)) {
+          console.log('🔗 ElevenLabs session detected:', sessionId);
+          // Continue with API call - no special localStorage handling needed
+        }
 
         // Handle demo sessions with localStorage - support various ID formats
         if (isDemoSession(sessionId)) {
@@ -140,10 +148,14 @@ export default function SessionResultsPage() {
         const { data: { session } } = await supabase.auth.getSession();
         const token = session?.access_token;
 
-        console.log('📡 Fetching session from database:', sessionId);
+        // ElevenLabs sessions don't require authentication, but database sessions do
+        const isElevenLabs = isElevenLabsSession(sessionId);
+        console.log(isElevenLabs ? '🔗 Fetching ElevenLabs session:' : '📡 Fetching database session:', sessionId);
+
         const response = await fetch(`/api/session/${sessionId}`, {
           headers: {
-            ...(token && { 'Authorization': `Bearer ${token}` }),
+            // Only include auth for non-ElevenLabs sessions
+            ...(token && !isElevenLabs && { 'Authorization': `Bearer ${token}` }),
             'Content-Type': 'application/json'
           }
         });
@@ -153,6 +165,19 @@ export default function SessionResultsPage() {
           if (result.isDemo) {
             setIsDemo(true);
             setError('This is a demo session. Analysis data is stored locally.');
+          } else if (result.isElevenLabs) {
+            // Handle ElevenLabs session
+            console.log('✅ ElevenLabs session loaded successfully');
+            const elevenLabsSession = result.session;
+
+            setSessionData({
+              ...elevenLabsSession,
+              title: elevenLabsSession.title || 'Voice Training Session',
+              isElevenLabs: true,
+              // ElevenLabs sessions may not have analysis data
+              detailedAnalysis: elevenLabsSession.detailedAnalysis || null,
+              metrics: elevenLabsSession.metrics || null
+            });
           } else if (result.session) {
             // Handle database session response format
             const dbSession = result.session;
@@ -206,9 +231,18 @@ export default function SessionResultsPage() {
 
           // Handle specific error cases
           if (response.status === 401) {
-            setError('Authentication required. Please log in to view this session.');
+            // Check if it's an ElevenLabs session that should have worked without auth
+            if (isElevenLabsSession(sessionId)) {
+              setError('Unable to load ElevenLabs session. The session may have expired or been deleted.');
+            } else {
+              setError('Authentication required. Please log in to view this session.');
+            }
           } else if (response.status === 404) {
-            setError('Session not found. It may have been deleted or does not exist.');
+            if (sessionId.startsWith('conv_')) {
+              setError('ElevenLabs session not found. It may have expired or been deleted.');
+            } else {
+              setError('Session not found. It may have been deleted or does not exist.');
+            }
           } else if (response.status >= 500) {
             setError('Server error. Please try again later.');
             // Retry server errors
@@ -239,7 +273,9 @@ export default function SessionResultsPage() {
     const reportData = {
       session: sessionData,
       exportedAt: new Date().toISOString(),
-      isDemo
+      isDemo,
+      isElevenLabs: sessionData?.isElevenLabs,
+      source: sessionData?.isElevenLabs ? 'elevenlabs' : isDemo ? 'demo' : 'database'
     };
 
     const blob = new Blob([JSON.stringify(reportData, null, 2)], { type: 'application/json' });
@@ -364,6 +400,7 @@ export default function SessionResultsPage() {
                 <h1 className="text-xl font-semibold text-gray-900">
                   {sessionData.title}
                   {isDemo && <span className="ml-2 text-sm bg-blue-100 text-blue-600 px-2 py-1 rounded">Demo</span>}
+                  {sessionData.isElevenLabs && <span className="ml-2 text-sm bg-purple-100 text-purple-600 px-2 py-1 rounded">ElevenLabs</span>}
                 </h1>
                 <p className="text-sm text-gray-500">
                   Voice Training Session • {new Date(sessionData.createdAt).toLocaleDateString()}
@@ -492,6 +529,30 @@ export default function SessionResultsPage() {
                      sessionData.status}
                   </span>
                 </p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* ElevenLabs sessions without analysis message */}
+        {sessionData.isElevenLabs && !sessionData.detailedAnalysis && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.5 }}
+            className="bg-amber-50 border border-amber-200 p-6 rounded-lg mb-8"
+          >
+            <div className="flex items-start space-x-3">
+              <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5" />
+              <div>
+                <h3 className="text-lg font-semibold text-amber-900">Analysis Not Available</h3>
+                <p className="text-amber-700 mt-1">
+                  This ElevenLabs session doesn't have detailed analysis data.
+                  To get AI-powered analysis and personalized feedback, please start a new session through our platform.
+                </p>
+                <Link href="/session" className="inline-flex items-center mt-3 text-amber-900 hover:text-amber-700 font-medium">
+                  Start New Session <ArrowRight className="w-4 h-4 ml-1" />
+                </Link>
               </div>
             </div>
           </motion.div>
