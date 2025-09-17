@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { normalizeSessionStatus, normalizeDates, isDemoSession } from '../../../lib/session-utils';
+import { normalizeSessionStatus, normalizeDates, isDemoSession } from '../../../../lib/session-utils';
 import {
   ArrowLeft,
   CheckCircle,

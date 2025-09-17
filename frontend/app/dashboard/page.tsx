@@ -84,14 +84,69 @@ export default function DashboardPage() {
           console.log('📋 Loading demo dashboard data...');
           setIsDemo(true);
           
-          // Load demo sessions from localStorage
-          const demoSessions = JSON.parse(localStorage.getItem('demo-sessions') || '[]');
-          const formattedDemoSessions: RecentSession[] = demoSessions.map((session: any) => ({
+          // Comment 3: Always scan and merge individual demo sessions
+          // Helper function to find and merge individual demo sessions
+          const findIndividualDemoSessions = () => {
+            // Find and migrate individual demo sessions
+            const migratedSessions: any[] = [];
+            for (let i = 0; i < localStorage.length; i++) {
+              const key = localStorage.key(i);
+              if (key?.startsWith('session-demo-')) {
+                try {
+                  const sessionData = JSON.parse(localStorage.getItem(key) || '{}');
+                  const sessionId = key.replace('session-', '');
+                  const analysisKey = `analysis-${sessionId}`;
+                  const durationKey = `session-duration-${sessionId}`;
+                  const analysisData = JSON.parse(localStorage.getItem(analysisKey) || '{}');
+                  const duration = parseInt(localStorage.getItem(durationKey) || '0');
+
+                  migratedSessions.push({
+                    id: sessionId,
+                    title: sessionData.title || 'Demo Voice Training Session',
+                    duration: duration || sessionData.duration,
+                    minutes: Math.ceil((duration || sessionData.duration || 0) / 60),
+                    score: analysisData?.overallScore ? analysisData.overallScore / 10 : 7.5,
+                    date: sessionData.createdAt || new Date().toISOString(),
+                    status: 'demo',
+                    improvement: 0, // Comment 6: Use deterministic placeholder
+                    feedback: analysisData?.summary || analysisData?.detailedAnalysis?.substring(0, 200) || 'Demo session completed',
+                    topics: ['Voice Training', 'Sales Conversation']
+                  });
+                } catch (error) {
+                  console.warn('Failed to parse individual demo session:', key);
+                }
+              }
+            }
+
+            return migratedSessions;
+          };
+
+          // Comment 3: Load and merge both consolidated and individual sessions
+          // Load demo sessions from consolidated storage
+          const consolidatedSessions = JSON.parse(localStorage.getItem('demo-sessions') || '[]');
+
+          // Always find individual sessions to merge
+          const individualSessions = findIndividualDemoSessions();
+
+          // Merge and deduplicate sessions
+          const mergedSessions = [...consolidatedSessions, ...individualSessions];
+          const allDemoSessions = mergedSessions.filter((session, index, self) =>
+            index === self.findIndex(s => s.id === session.id)
+          ).slice(0, 10); // Keep only last 10 sessions
+
+          // Update localStorage with merged sessions if we found new ones
+          if (individualSessions.length > 0 || allDemoSessions.length !== consolidatedSessions.length) {
+            localStorage.setItem('demo-sessions', JSON.stringify(allDemoSessions));
+            console.log('Updated demo sessions:', allDemoSessions.length);
+          }
+
+          // Format sessions for display
+          const formattedDemoSessions: RecentSession[] = allDemoSessions.map((session: any) => ({
             ...session,
-            id: session.id || `demo-${Date.now()}-${Math.random()}`, // Ensure demo sessions have IDs
+            id: session.id || `demo-${Date.now()}-${Math.random()}`,
             date: new Date(session.date),
-            minutes: session.duration ? Math.ceil(session.duration / 60) : session.minutes,
-            status: 'demo', // Explicitly mark as demo
+            minutes: session.minutes || (session.duration ? Math.ceil(session.duration / 60) : 0),
+            status: 'demo' as const,
             feedback: session.feedback || 'Demo session - no analysis available'
           }));
           
@@ -491,9 +546,10 @@ export default function DashboardPage() {
                             variants={itemVariants}
                             className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer"
                             onClick={() => {
-                              // Handle demo sessions
+                              // Handle demo sessions - allow navigation to results
                               if (session.status === 'demo' || session.id?.startsWith('demo-')) {
-                                toast.success('Demo session analytics loaded!');
+                                console.log('🔗 Navigating to demo session results:', session.id);
+                                router.push(`/session/${session.id}/results`);
                                 return;
                               }
 
@@ -569,13 +625,21 @@ export default function DashboardPage() {
                 <BarChart3 className="h-5 w-5 text-blue-400" />
               </div>
               <div className="ml-3">
-                <h3 className="text-sm font-medium text-blue-800">Demo Analytics</h3>
-                <p className="mt-1 text-sm text-blue-700">
-                  This dashboard shows analytics from your demo session. 
-                  <Link href="/register" className="underline ml-1">
-                    Sign up for real-time analytics
-                  </Link> and detailed feedback.
-                </p>
+                <h3 className="text-sm font-medium text-blue-800">Demo Analytics Dashboard</h3>
+                <div className="mt-1 text-sm text-blue-700">
+                  <p>You have {recentSessions.length} demo session{recentSessions.length > 1 ? 's' : ''} stored locally.</p>
+                  <p className="mt-2">Demo sessions include:</p>
+                  <ul className="list-disc list-inside mt-1 ml-2">
+                    <li>AI-powered voice analysis and scoring</li>
+                    <li>Session transcripts and feedback</li>
+                    <li>Performance metrics and recommendations</li>
+                  </ul>
+                  <p className="mt-2">
+                    <Link href="/register" className="underline font-medium text-blue-800">
+                      Create a free account
+                    </Link> to save sessions permanently and unlock advanced features.
+                  </p>
+                </div>
               </div>
             </div>
           </motion.div>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import VoiceSessionInterface from '../../components/voice-session/voice-session-interface';
 import { toast } from 'react-hot-toast';
@@ -16,10 +16,14 @@ export default function SessionPage() {
   const router = useRouter();
   const supabase = createClient();
 
+  // Comment 1: Create a stable demo session ID with immediate initial value
+  const demoSessionIdRef = useRef<string>(`demo-${Date.now()}`);
+
   console.log('📟 SessionPage current state:', {
     sessionId,
     isReady,
-    userInfo: !!userInfo
+    userInfo: !!userInfo,
+    demoSessionId: demoSessionIdRef.current
   });
 
   // Check user authentication
@@ -63,9 +67,46 @@ export default function SessionPage() {
     checkUserAuth();
   }, []);
 
+  // Helper function to save demo session to consolidated storage for dashboard
+  const saveDemoSessionToStorage = (sessionData: any, analysisData?: any) => {
+    try {
+      // Get existing demo sessions
+      const existingDemoSessions = JSON.parse(localStorage.getItem('demo-sessions') || '[]');
+
+      // Create formatted session for dashboard
+      const timestamp = new Date();
+      const formattedSession = {
+        id: sessionData.id,
+        title: sessionData.title || `Demo Session - ${timestamp.toLocaleTimeString()}`,
+        duration: sessionData.duration,
+        minutes: Math.ceil(sessionData.duration / 60),
+        score: analysisData?.overallScore ? analysisData.overallScore / 10 : 7.5, // Convert 0-100 to 0-10 scale
+        date: timestamp.toISOString(),
+        status: 'demo',
+        improvement: 0, // Comment 6: Use deterministic placeholder instead of random
+        feedback: analysisData?.summary || analysisData?.detailedAnalysis?.substring(0, 200) || 'Demo session completed successfully',
+        topics: ['Voice Training', 'Sales Conversation']
+      };
+
+      // Add to existing sessions (keep only last 10)
+      const updatedSessions = [formattedSession, ...existingDemoSessions]
+        .filter((session, index, self) =>
+          index === self.findIndex(s => s.id === session.id)
+        ) // Remove duplicates
+        .slice(0, 10);
+
+      // Save back to localStorage
+      localStorage.setItem('demo-sessions', JSON.stringify(updatedSessions));
+      console.log('✅ Demo session saved to consolidated storage');
+    } catch (error) {
+      console.error('❌ Error saving demo session to storage:', error);
+    }
+  };
+
   // Handle session end with enhanced analysis integration
   const handleSessionEnd = async (duration: number, transcript?: TranscriptMessage[]) => {
-    const currentSessionId = sessionId || `demo-${Date.now()}`;
+    // Comment 1: Use stable demo session ID without fallback
+    const currentSessionId = sessionId || demoSessionIdRef.current;
     console.log('🏁 Enhanced session ended:', {
       sessionId: currentSessionId,
       duration,
@@ -82,7 +123,8 @@ export default function SessionPage() {
 
       console.log('📝 Formatted transcript for analysis:', formattedTranscript);
 
-      // Prepare session end data
+      // Comment 5: API contract documentation - uses snake_case fields
+      // Prepare session end data with snake_case fields as expected by the API
       const sessionEndData = {
         session_id: currentSessionId,
         duration_seconds: duration,
@@ -115,15 +157,29 @@ export default function SessionPage() {
           toast.success(`🎉 Session completed! Duration: ${Math.round(duration/60)} minutes`);
         }
 
+        // Comment 4: Store demo sessions even without transcript
         // Store demo analysis locally if it's a demo session
-        if (currentSessionId.startsWith('demo-') && formattedTranscript.length > 0) {
-          localStorage.setItem(`session-${currentSessionId}`, JSON.stringify({
+        if (currentSessionId.startsWith('demo-') && duration > 0) {
+          // Validate demo session data
+          if (!currentSessionId || typeof duration !== 'number' || duration <= 0) {
+            console.warn('⚠️ Invalid demo session data');
+            return;
+          }
+
+          const demoSessionData = {
             id: currentSessionId,
+            title: `Demo Session - ${new Date().toLocaleTimeString()}`,
             duration,
             transcript: formattedTranscript,
             createdAt: new Date().toISOString()
-          }));
+          };
+
+          // Store individual session data for backward compatibility
+          localStorage.setItem(`session-${currentSessionId}`, JSON.stringify(demoSessionData));
           localStorage.setItem(`session-duration-${currentSessionId}`, duration.toString());
+
+          // Save to consolidated storage for dashboard
+          saveDemoSessionToStorage(demoSessionData);
 
           // Call analyze API to get demo analysis and store it in localStorage
           try {
@@ -149,11 +205,33 @@ export default function SessionPage() {
               // Store the analysis in localStorage for the results page
               localStorage.setItem(`analysis-${currentSessionId}`, JSON.stringify(analysisData.analysis));
               console.log('✅ Demo analysis saved to localStorage');
+
+              // Update consolidated storage with analysis data
+              const sessionData = JSON.parse(localStorage.getItem(`session-${currentSessionId}`) || '{}');
+              saveDemoSessionToStorage(sessionData, analysisData.analysis);
+
+              // Comment 1: Fix score scale in toast (convert 0-100 to 0-10 if needed)
+              // Show toast with analysis feedback
+              if (analysisData.analysis?.overallScore !== undefined) {
+                const scoreValue = analysisData.analysis.overallScore;
+                const displayScore = scoreValue > 10 ? Math.round(scoreValue / 10) : Math.round(scoreValue);
+                toast.success(`Analysis complete! Score: ${displayScore}/10`);
+              }
             } else {
               console.warn('⚠️ Failed to generate demo analysis');
+              // Still save session without analysis
+              const sessionData = JSON.parse(localStorage.getItem(`session-${currentSessionId}`) || '{}');
+              saveDemoSessionToStorage(sessionData);
             }
           } catch (analysisError) {
             console.error('❌ Error generating demo analysis:', analysisError);
+            // Still save session without analysis
+            try {
+              const sessionData = JSON.parse(localStorage.getItem(`session-${currentSessionId}`) || '{}');
+              saveDemoSessionToStorage(sessionData);
+            } catch (storageError) {
+              console.error('❌ Error saving demo session:', storageError);
+            }
           }
         }
       } else {
@@ -176,8 +254,8 @@ export default function SessionPage() {
      }
    };
 
-   // Generate a session ID for our system
-   const currentSessionId = sessionId || `demo-${Date.now()}`;
+   // Comment 1: Use stable session ID without render-time fallback
+   const currentSessionId = sessionId || demoSessionIdRef.current;
 
    // Initialize session ID on component mount
    useEffect(() => {
@@ -216,10 +294,9 @@ export default function SessionPage() {
              return;
            }
          } else {
-           // For demo users, use client-side generation
-           const demoSessionId = `demo-${Date.now()}`;
-           setSessionId(demoSessionId);
-           console.log('🆔 Demo session ID:', demoSessionId);
+           // Comment 1: For demo users, rely solely on demoSessionIdRef - do not set sessionId
+           console.log('🆔 Using stable demo session ID from ref:', demoSessionIdRef.current);
+           // Do NOT set sessionId for demo users - use demoSessionIdRef.current throughout
          }
        }
      };
